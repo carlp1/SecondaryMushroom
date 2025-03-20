@@ -189,22 +189,32 @@ class DecisionTree:
         add_edges(dot, self.root)
         return dot
 
-    def grid_search(X, y, criteria, stop_criterion, stop_values, feature_names=None, n_splits=5, n_jobs=-1):
+    def grid_search(X, y, param_grid, feature_names=None, n_splits=5, n_jobs=-1, sample_frac=0.1):
         """
-        Performs grid search with cross validation for a single stopping criterion.
-        For each impurity measure in 'criteria' and for each value in 'stop_values' for the given stopping criterion,
-        this function does the following:
-            - Splits the data into 'n_splits' folds,
-            - For each fold, trains on the (n_splits-1) folds and tests on the remaining fold,
-            - Computes both training and test zero-one loss,
-            - Records the average performance across folds along with the average tree depth and number of leaves.
-            - Uses parallelization via joblib to speed up the process across parameter combinations.
+        Performs grid search with cross-validation for all hyperparameters simultaneously.
+        Args:
+            X: Features (numpy array or pandas DataFrame).
+            y: Target labels (numpy array or pandas Series).
+            param_grid: Dictionary of hyperparameters and their possible values.
+            feature_names: List of feature names (optional).
+            n_splits: Number of folds for cross-validation.
+            n_jobs: Number of jobs for parallel processing.
+            sample_frac: Fraction of the dataset to sample for faster execution.
+        Returns:
+            List of dictionaries containing the results for each hyperparameter combination.
         """
         # Convert X, y to NumPy arrays if not already
         X = np.array(X)
         y = np.array(y)
 
-        def evaluate_combination(crit, val):
+        # Sample a subset of the dataset
+        if sample_frac < 1.0:
+            sample_size = int(len(X) * sample_frac)
+            indices = np.random.choice(len(X), sample_size, replace=False)
+            X = X[indices]
+            y = y[indices]
+
+        def evaluate_combination(params):
             train_losses = []
             test_losses = []
             tree_depths = []
@@ -215,34 +225,13 @@ class DecisionTree:
                 X_train_cv, X_test_cv = X[train_index], X[test_index]
                 y_train_cv, y_test_cv = y[train_index], y[test_index]
 
-                if stop_criterion == 'max_depth':
-                    tree = DecisionTree(
-                        criterion=crit,
-                        max_depth=val,
-                        min_samples_split=2,
-                        impurity_threshold=None,
-                        feature_names=feature_names
-                    )
-                elif stop_criterion == 'min_samples_split':
-                    tree = DecisionTree(
-                        criterion=crit,
-                        max_depth=None,
-                        min_samples_split=val,
-                        impurity_threshold=None,
-                        feature_names=feature_names
-                    )
-                elif stop_criterion == 'impurity_threshold':
-                    tree = DecisionTree(
-                        criterion=crit,
-                        max_depth=None,
-                        min_samples_split=2,
-                        impurity_threshold=val,
-                        feature_names=feature_names
-                    )
-                else:
-                    raise ValueError(
-                        "stop_criterion must be one of: 'max_depth', 'min_samples_split', 'impurity_threshold'")
-
+                tree = DecisionTree(
+                    criterion=params['criterion'],
+                    max_depth=params['max_depth'],
+                    min_samples_split=params['min_samples_split'],
+                    impurity_threshold=params['impurity_threshold'],
+                    feature_names=feature_names
+                )
                 tree.fit(X_train_cv, y_train_cv)
 
                 # Predict on the training fold
@@ -264,25 +253,27 @@ class DecisionTree:
             avg_depth = np.mean(tree_depths)
             avg_leaf = np.mean(leaf_counts)
 
-            print(f"Trained with {crit}, {stop_criterion}={val} -> "
+            print(f"Trained with {params} -> "
                   f"Avg Train Loss: {avg_train_loss:.5f}, Avg Test Loss: {avg_test_loss:.5f}, "
                   f"Depth: {avg_depth:.2f}, Leaves: {avg_leaf:.2f}")
 
             return {
-                'criterion': crit,
-                stop_criterion: val,
+                **params,
                 'avg_train_loss': avg_train_loss,
                 'avg_test_loss': avg_test_loss,
                 'avg_tree_depth': avg_depth,
                 'avg_leaf_count': avg_leaf
             }
 
-        param_combinations = [(crit, val) for crit in criteria for val in stop_values]
+        # Generate all combinations of hyperparameters
+        from itertools import product
+        param_combinations = [dict(zip(param_grid.keys(), values)) for values in product(*param_grid.values())]
         print(
             f"\nTotal number of parameter combinations: {len(param_combinations)} x {n_splits}-fold CV = {n_splits * len(param_combinations)} runs\n")
 
+        # Run grid search in parallel
         results = Parallel(n_jobs=n_jobs)(
-            delayed(evaluate_combination)(crit, val) for crit, val in param_combinations
+            delayed(evaluate_combination)(params) for params in param_combinations
         )
 
         return results
@@ -312,50 +303,24 @@ if __name__ == '__main__':
     X = data_encoded.drop(columns=['class_p', 'class_e'])
     y = data_encoded['class_p']
 
+    # Define the parameter grid for grid search
+    param_grid = {
+        'criterion': ['gini', 'entropy', 'squared'],
+        'max_depth': [10, 15, 20],
+        'min_samples_split': [2, 5, 10, 25, 50, 100],
+        'impurity_threshold': [0.0, 0.01, 0.1, 0.2, 0.25, 0.5]
+    }
 
-
-    # Grid Search: Tuning max_depth
-    print("\n===== Tuning max_depth =====")
-    max_depth_values = [10, 11, 12, 13, 20, 25, 30, 40, 50]
-    results_max_depth = DecisionTree.grid_search(
+    # Perform grid search
+    print("\n===== Performing Grid Search =====")
+    results = DecisionTree.grid_search(
         X, y,
-        criteria=['gini', 'entropy', 'squared'],
-        stop_criterion='max_depth',
-        stop_values=max_depth_values,
-        feature_names=list(X.columns)
+        param_grid=param_grid,
+        feature_names=list(X.columns),
+        sample_frac=0.1  # Use 10% of the dataset
     )
-    results_max_depth_df = pd.DataFrame(results_max_depth)
-    # Sort by impurity measure first, then by max_depth
-    results_max_depth_df = results_max_depth_df.sort_values(by=['criterion', 'max_depth'])
-    print("\nResults for max_depth tuning:")
-    print(results_max_depth_df)
 
-    # Grid Search: Tuning min_samples_split
-    print("\n===== Tuning min_samples_split =====")
-    min_samples_values = [2, 5, 10, 25, 50, 100]
-    results_min_samples = DecisionTree.grid_search(
-        X, y,
-        criteria=['gini', 'entropy', 'squared'],
-        stop_criterion='min_samples_split',
-        stop_values=min_samples_values,
-        feature_names=list(X.columns)
-    )
-    results_min_samples_df = pd.DataFrame(results_min_samples)
-    results_min_samples_df = results_min_samples_df.sort_values(by=['criterion', 'min_samples_split'])
-    print("\nResults for min_samples_split tuning:")
-    print(results_min_samples_df)
-
-    # Grid Search: Tuning impurity_threshold
-    print("\n===== Tuning impurity_threshold =====")
-    impurity_threshold_values = [0.0, 0.01, 0.1, 0.2, 0.25, 0.5]
-    results_impurity_thresh = DecisionTree.grid_search(
-        X, y,
-        criteria=['gini', 'entropy', 'squared'],
-        stop_criterion='impurity_threshold',
-        stop_values=impurity_threshold_values,
-        feature_names=list(X.columns)
-    )
-    results_impurity_thresh_df = pd.DataFrame(results_impurity_thresh)
-    results_impurity_thresh_df = results_impurity_thresh_df.sort_values(by=['criterion', 'impurity_threshold'])
-    print("\nResults for impurity_threshold tuning:")
-    print(results_impurity_thresh_df)
+    # Convert results to DataFrame for easier analysis
+    results_df = pd.DataFrame(results)
+    print("\nGrid Search Results:")
+    print(results_df)
